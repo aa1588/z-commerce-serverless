@@ -1,0 +1,301 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Z-Commerce Serverless E-commerce Application
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+  
+  TableName:
+    Type: String
+    Default: ZCommerceTable
+    Description: DynamoDB table name for the application
+
+Globals:
+  Function:
+    Runtime: java17
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref DynamoDBTable
+        ENVIRONMENT: !Ref Environment
+    Tracing: Active
+
+Resources:
+  # DynamoDB Table - Single table design
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TableName}-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Application
+          Value: Z-Commerce
+        - Key: Environment
+          Value: !Ref Environment
+
+  # API Gateway
+  ZCommerceApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        MaxAge: 600
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >
+          {
+            "requestId": "$context.requestId",
+            "requestTime": "$context.requestTime",
+            "httpMethod": "$context.httpMethod",
+            "path": "$context.path",
+            "status": "$context.status",
+            "responseLength": "$context.responseLength",
+            "responseTime": "$context.responseTime"
+          }
+
+  # CloudWatch Log Group for API Gateway
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/z-commerce-${Environment}"
+      RetentionInDays: 14
+
+  # User Service Lambda Function
+  UserServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "z-commerce-user-service-${Environment}"
+      CodeUri: user-service/target/user-service-1.0.0.jar
+      Handler: com.zcommerce.users.UserHandler::handleRequest
+      MemorySize: 256
+      Timeout: 15
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+      Events:
+        RegisterUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /users/register
+            Method: POST
+        LoginUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /users/login
+            Method: POST
+        GetUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /users/{userId}
+            Method: GET
+        UpdateUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /users/{userId}
+            Method: PUT
+
+  # Product Service Lambda Function
+  ProductServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "z-commerce-product-service-${Environment}"
+      CodeUri: product-service/target/product-service-1.0.0.jar
+      Handler: com.zcommerce.products.ProductHandler::handleRequest
+      MemorySize: 512
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+      Events:
+        ListProducts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /products
+            Method: GET
+        GetProduct:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /products/{productId}
+            Method: GET
+        CreateProduct:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /products
+            Method: POST
+        UpdateProduct:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /products/{productId}
+            Method: PUT
+        DeleteProduct:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /products/{productId}
+            Method: DELETE
+
+  # Cart Service Lambda Function
+  CartServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "z-commerce-cart-service-${Environment}"
+      CodeUri: cart-service/target/cart-service-1.0.0.jar
+      Handler: com.zcommerce.cart.CartHandler::handleRequest
+      MemorySize: 256
+      Timeout: 15
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+      Events:
+        GetCart:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /cart/{userId}
+            Method: GET
+        AddToCart:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /cart/{userId}/items
+            Method: POST
+        UpdateCartItem:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /cart/{userId}/items/{productId}
+            Method: PUT
+        RemoveFromCart:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /cart/{userId}/items/{productId}
+            Method: DELETE
+
+  # Order Service Lambda Function
+  OrderServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "z-commerce-order-service-${Environment}"
+      CodeUri: order-service/target/order-service-1.0.0.jar
+      Handler: com.zcommerce.orders.OrderHandler::handleRequest
+      MemorySize: 512
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+      Events:
+        CreateOrder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /orders
+            Method: POST
+        GetOrder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /orders/{orderId}
+            Method: GET
+        GetUserOrders:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /users/{userId}/orders
+            Method: GET
+
+  # Payment Service Lambda Function
+  PaymentServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "z-commerce-payment-service-${Environment}"
+      CodeUri: payment-service/target/payment-service-1.0.0.jar
+      Handler: com.zcommerce.payments.PaymentHandler::handleRequest
+      MemorySize: 256
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+      Events:
+        ProcessPayment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /payments/process
+            Method: POST
+        GetPayment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ZCommerceApi
+            Path: /payments/{transactionId}
+            Method: GET
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ZCommerceApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref DynamoDBTable
+    Export:
+      Name: !Sub "${AWS::StackName}-DynamoDBTable"
+
+  DynamoDBTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt DynamoDBTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DynamoDBTableArn"
